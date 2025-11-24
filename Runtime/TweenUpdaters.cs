@@ -50,7 +50,7 @@ namespace VG
             internal void TransformUp(TweenObject obj, float interpolationFactor)
             {
                 GameObject tweenTarget = obj._object as GameObject;
-                tweenTarget.transform.up = Vector3.LerpUnclamped(obj.start._vec3, obj.end._vec3, interpolationFactor);
+                tweenTarget.transform.up = Vector3.SlerpUnclamped(obj.start._vec3, obj.end._vec3, interpolationFactor);
             }
 
             internal void CameraFOV(TweenObject obj, float interpolationFactor)
@@ -93,7 +93,7 @@ namespace VG
                 Shader.SetGlobalFloat(obj.matShaderValue, Mathf.LerpUnclamped(obj.start._number, obj.end._number, interpolationFactor));
             }
 
-            internal void ShaderGlobalVector(TweenObject obj, float interpolationFactor)
+            internal void ShaderGlobalVector3(TweenObject obj, float interpolationFactor)
             {
                 Shader.SetGlobalVector(obj.matShaderValue, Vector3.LerpUnclamped(obj.start._vec3, obj.end._vec3, interpolationFactor));
             }
@@ -102,12 +102,6 @@ namespace VG
             {
                 Material mat = obj._object as Material;
                 mat.color = Color.LerpUnclamped(obj.start._color, obj.end._color, interpolationFactor);
-            }
-
-            internal void GlobalMatVar(TweenObject obj, float interpolationFactor)
-            {
-                float value = Mathf.LerpUnclamped(obj.start._number, obj.end._number, interpolationFactor);
-                Shader.SetGlobalFloat(obj.matShaderValue, value);
             }
 
             internal void ImageColor(TweenObject obj, float interpolationFactor)

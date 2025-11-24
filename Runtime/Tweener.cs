@@ -1,10 +1,8 @@
 using System;
 using System.Collections.Generic;
-using JetBrains.Annotations;
 using TMPro;
 using Unity.Cinemachine;
 using UnityEngine;
-using UnityEngine.Events;
 using UnityEngine.Splines;
 using UnityEngine.UI;
 
@@ -33,7 +31,10 @@ namespace VG
             private int _poolSize = 256;
             private long _internalIdCounter = 1;  
             internal Stack<TweenObject> _tweenPool = new Stack<TweenObject>();
+
             [SerializeField] internal List<TweenObject> _activeTweens = new List<TweenObject>();
+            [SerializeField] internal List<TweenObject> _fixedUpdateTweens = new List<TweenObject>();
+            [SerializeField] internal List<TweenObject> _lateUpdateTweens = new List<TweenObject>();
 
             internal bool _initialized = false;
 
@@ -94,7 +95,7 @@ namespace VG
                 obj._object = targetObject;
                 obj.duration = settings.duration;
                 obj.initialDuration = settings.duration;
-                obj.useUnscaledTime = settings.useUnscaledTime;
+                obj.useUnscaledTime = settings.updateType == Tweener.UpdateType.UnscaledUpdate || settings.updateType == Tweener.UpdateType.UnscaledFixedUpdate || settings.updateType == Tweener.UpdateType.UnscaledLateUpdate;
                 obj.reverses = settings.reverses;
                 obj.reverseDuration = settings.reverseDuration;
                 obj.repeatCount = settings.repeatCount;
@@ -106,11 +107,24 @@ namespace VG
                 obj.matShaderValue = settings.matShaderValue;
                 obj.splineIndex = settings.splineIndex;
                 obj.knotIndex = settings.knotIndex;
-
-                if (_activeTweens.Count > 0) tweenOverrideCheck(obj);
+                obj.updateType = settings.updateType;
 
                 // add to update tweens
-                _activeTweens.Add(obj);
+                if (settings.updateType == Tweener.UpdateType.Update || settings.updateType == Tweener.UpdateType.UnscaledUpdate)
+                {
+                    if (_activeTweens.Count > 0) tweenOverrideCheck(obj);
+                    _activeTweens.Add(obj);
+                }
+                else if (settings.updateType == Tweener.UpdateType.FixedUpdate || settings.updateType == Tweener.UpdateType.UnscaledFixedUpdate)
+                {
+                    if (_fixedUpdateTweens.Count > 0) tweenOverrideCheck(obj);
+                    _fixedUpdateTweens.Add(obj);
+                }
+                else if (settings.updateType == Tweener.UpdateType.LateUpdate || settings.updateType == Tweener.UpdateType.UnscaledLateUpdate)
+                {
+                    if (_lateUpdateTweens.Count > 0) tweenOverrideCheck(obj);
+                    _lateUpdateTweens.Add(obj);
+                }
 
                 Tween newTween = new Tween(obj);
 
@@ -125,9 +139,27 @@ namespace VG
             {
                 //Assert.IsTrue(toFree.inUse, "TweenObject already in pool.");
 
-                // reset values back to default
-                _activeTweens.Remove(toFree);
+                // before cleaning tween, fire off any completion callbacks
+                toFree.onCompleteActions?.Invoke(new Tween(toFree));
 
+                // remove tween from active list
+                if (toFree.updateType == Tweener.UpdateType.Update || toFree.updateType == Tweener.UpdateType.UnscaledUpdate)
+                {
+                    if (_activeTweens.Count > 0) tweenOverrideCheck(toFree);
+                    _activeTweens.Remove(toFree);
+                }
+                else if (toFree.updateType == Tweener.UpdateType.FixedUpdate || toFree.updateType == Tweener.UpdateType.UnscaledFixedUpdate)
+                {
+                    if (_fixedUpdateTweens.Count > 0) tweenOverrideCheck(toFree);
+                    _fixedUpdateTweens.Remove(toFree);
+                }
+                else if (toFree.updateType == Tweener.UpdateType.LateUpdate || toFree.updateType == Tweener.UpdateType.UnscaledLateUpdate)
+                {
+                    if (_lateUpdateTweens.Count > 0) tweenOverrideCheck(toFree);
+                    _lateUpdateTweens.Remove(toFree);
+                }
+
+                // reset values back to default
                 toFree.inUse = false;
                 toFree._object = null;
                 toFree.id = 0;
@@ -138,10 +170,11 @@ namespace VG
                 toFree.duration = 0;
                 toFree.initialDuration = 0;
                 toFree.repeatCount = 0;
-                toFree.pasued = false;
+                toFree.paused = false;
                 toFree.looping = false;
                 toFree.reverses = false;
-                toFree.reverseDuration = 0;
+                toFree.useUnscaledTime = false;
+                toFree.reverseDuration = -1f;
                 toFree.currentTime = 0;
 
                 // clear callbacks
@@ -164,26 +197,112 @@ namespace VG
                 return true;
             }
 
+            internal bool overrideComparison(TweenObject toCheck, TweenObject other)
+            {
+                if (toCheck.id == other.id) return false;
+                if (toCheck._object != other._object) return false;
+                if (!toCheck.updateFnc.Equals(other.updateFnc)) return false;
+
+                if (toCheck._object is SplineContainer)
+                {
+                    if (other.knotIndex != toCheck.knotIndex || other.splineIndex != toCheck.splineIndex)
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+
             internal void tweenOverrideCheck(TweenObject toCheck)
             {
                 for (int i = 0; i < _activeTweens.Count; i++)
                 {
                     TweenObject other = _activeTweens[i];
-                    if (toCheck.id != other.id && toCheck == other)
-                    {
-                        if (other._object is SplineContainer && toCheck._object is SplineContainer)
-                        {
-                            if (other.knotIndex != toCheck.knotIndex || other.splineIndex != toCheck.splineIndex)
-                            {
-                                continue;
-                            }
-                        }
 
-                        freeTweenToPoolInternal(other);
-                        --i;
-                    }
+                    if (!overrideComparison(toCheck, other)) continue;
+
+                    freeTweenToPoolInternal(other);
+                    --i;
+                }
+                for (int i = 0; i < _fixedUpdateTweens.Count; i++)
+                {
+                    TweenObject other = _fixedUpdateTweens[i];
+
+                    if (!overrideComparison(toCheck, other)) continue;
+
+                    freeTweenToPoolInternal(other);
+                    --i;
+                }
+                for (int i = 0; i < _lateUpdateTweens.Count; i++)
+                {
+                    TweenObject other = _lateUpdateTweens[i];
+
+                    if (!overrideComparison(toCheck, other)) continue;
+
+                    freeTweenToPoolInternal(other);
+                    --i;
                 }
             }
+
+            internal void tweenUpdate(TweenObject obj, float dt, float unscaledDt)
+            {
+                if (!assessTracking(obj)) return;
+                if (!obj.useUnscaledTime && dt == 0) return; // early exit for if game is paused when using scaled delta time
+                if (obj.paused) return;
+
+                // calculate interpolation factor
+                obj.currentTime += obj.useUnscaledTime ? unscaledDt : dt;
+
+                if (obj.currentTime > obj.duration) // has tween completed
+                {
+                    obj.updateFnc.Invoke(obj, 1f);
+
+                    if (obj.reverses)
+                    {
+                        ValueContainer start = obj.end, end = obj.start;
+                        obj.start = start;
+                        obj.end = end;
+                        obj.currentTime = 0;
+                        obj.duration = obj.reverseDuration;
+                        obj.reverses = false;
+                        return;
+                    }
+                    else if (!obj.reverses && obj.reverseDuration > 0f)
+                    {
+                        ValueContainer start = obj.end, end = obj.start;
+                        obj.start = start;
+                        obj.end = end;
+                        obj.duration = obj.initialDuration;
+                        obj.reverses = true;
+                    }
+
+                    if (obj.looping)
+                    {
+                        obj.currentTime = 0;
+                        return;
+                    }
+
+                    if (obj.repeatCount > 0)
+                    {
+                        --obj.repeatCount;
+                        obj.currentTime = 0;
+                        return;
+                    }
+                    obj.currentTime = obj.duration;
+                    freeTweenToPoolInternal(obj);
+                    return;
+                }
+
+                bool easeIn = obj.easeDirection == EasingDirection.In;
+
+                float interpolationFactor = Easing.EasingFunctions[(int)obj.easeStyle].Invoke(obj.currentTime / obj.duration, easeIn);
+
+                if (!assessTracking(obj)) return;
+                obj.updateFnc.Invoke(obj, interpolationFactor);
+                obj.onUpdateActions?.Invoke(new Tween(obj));
+            }
+
             #endregion
 
             #region Unity Methods
@@ -196,62 +315,49 @@ namespace VG
             private void Update()
             {
                 if (!_initialized) return;
+                if (_activeTweens.Count == 0) return;
+
+                float dt = Time.deltaTime, unscaledDt = Time.unscaledDeltaTime;
 
                 for (int i = 0; i < _activeTweens.Count; i++)
                 {
                     TweenObject obj = _activeTweens[i];
-                    if (!assessTracking(obj)) continue;
-
-                    // calculate interpolation factor
-                    obj.currentTime += obj.useUnscaledTime ? Time.unscaledDeltaTime : Time.deltaTime;
-
-                    if (obj.currentTime > obj.duration) // has tween completed
-                    {
-                        obj.updateFnc.Invoke(obj, 1f);
-
-                        if (obj.reverses)
-                        {
-                            ValueContainer start = obj.end, end = obj.start;
-                            obj.start = start;
-                            obj.end = end;
-                            obj.currentTime = 0;
-                            obj.duration = obj.reverseDuration;
-                            obj.reverses = false;
-                            continue;
-                        }
-                        else if (!obj.reverses && obj.reverseDuration > 0f)
-                        {
-                            ValueContainer start = obj.end, end = obj.start;
-                            obj.start = start;
-                            obj.end = end;
-                            obj.duration = obj.initialDuration;
-                            obj.reverses = true;
-                        }
-
-                        if (obj.repeatCount > 0)
-                        {
-                            --obj.repeatCount;
-                            obj.currentTime = 0;
-                            continue;
-                        }
-
-                        freeTweenToPoolInternal(obj);
-                        continue;
-                    }
-
-                    bool easeIn = obj.easeDirection == EasingDirection.In;
-
-                    float interpolationFactor = Easing.EasingFunctions[(int)obj.easeStyle].Invoke(obj.currentTime / obj.duration, easeIn);
-
-                    if (!assessTracking(obj)) continue;
-                    obj.updateFnc.Invoke(obj, interpolationFactor);
-                    obj.onUpdateActions?.Invoke(new Tween(obj));
+                    tweenUpdate(obj, dt, unscaledDt);
                 }
             }
+
+            private void FixedUpdate()
+            {
+                if (!_initialized) return;
+                if (_fixedUpdateTweens.Count == 0) return;
+
+                float dt = Time.fixedDeltaTime, unscaledDt = Time.fixedUnscaledDeltaTime;
+
+                for (int i = 0; i < _fixedUpdateTweens.Count; i++)
+                {
+                    TweenObject obj = _fixedUpdateTweens[i];
+                    tweenUpdate(obj, dt, unscaledDt);
+                }
+            }
+
+            private void LateUpdate()
+            {
+                if (!_initialized) return;
+                if (_lateUpdateTweens.Count == 0) return;
+
+                float dt = Time.deltaTime, unscaledDt = Time.unscaledDeltaTime;
+
+                for (int i = 0; i < _lateUpdateTweens.Count; i++)
+                {
+                    TweenObject obj = _lateUpdateTweens[i];
+                    tweenUpdate(obj, dt, unscaledDt);
+                }
+            }
+
             #endregion
         }
 
-        public sealed class Tweener
+        public sealed partial class Tweener
         {
             public delegate void TweenCallback(Tween tween);
 
@@ -294,456 +400,28 @@ namespace VG
             public static void CancelTweens(UnityEngine.Object obj)
             {
                 TweeningManager manager = TweeningManager.instance;
-                for (int i = manager._activeTweens.Count-1; i >= 0; i--)
+                for (int i = manager._activeTweens.Count - 1; i >= 0; i--)
                 {
                     TweenObject currentObj = manager._activeTweens[i];
                     if (obj != currentObj._object) continue;
-                    
+
+                    manager.freeTweenToPoolInternal(currentObj);
+                }
+                for (int i = manager._fixedUpdateTweens.Count - 1; i >= 0; i--)
+                {
+                    TweenObject currentObj = manager._fixedUpdateTweens[i];
+                    if (obj != currentObj._object) continue;
+
+                    manager.freeTweenToPoolInternal(currentObj);
+                }
+                for (int i = manager._lateUpdateTweens.Count - 1; i >= 0; i--)
+                {
+                    TweenObject currentObj = manager._lateUpdateTweens[i];
+                    if (obj != currentObj._object) continue;
+
                     manager.freeTweenToPoolInternal(currentObj);
                 }
             }
-
-            #region Interpolation Methods
-
-            //public static Tween Custom(float start, float end, float duration, EasingStyle style, EasingDirection direction = EasingDirection.Out, int repeatCount = 0)
-            //{
-            //    TweeningManager manager = TweeningManager.instance;
-            //    TweenInfo newInfo = new TweenInfo()
-            //    {
-            //        duration = duration,
-            //        startValue = new ValueContainer(start),
-            //        endValue = new ValueContainer(end),
-            //        direction = direction,
-            //        easeStyle = style,
-            //        repeatCount = repeatCount,
-            //    };
-
-            //    return manager.startTweenInternal(newInfo);
-            //}
-        
-            /// <summary>
-            /// Interpolates from the current passed shader value to the target value.
-            /// </summary>
-            /// <param name="mat">The material to tween.</param>
-            /// <param name="shaderValue">The shader float parameter.</param>
-            /// <param name="duration">How long the tween should last.</param>
-            /// <param name="targetValue">The value to tween to.</param>
-            /// <param name="style">The easing style to use.</param>
-            /// <param name="direction">The direction to ease with.</param>
-            /// <returns>A tween struct to help in controlling the tween after it is created.</returns>
-            public static Tween ShaderFloat(Material mat, string shaderValue, float targetValue, float duration, EasingStyle style, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, float startValue = default(float), int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo()
-                {
-                    duration = duration,
-                    matShaderValue = shaderValue,
-                    startValue = new ValueContainer(mat.GetFloat(shaderValue)),
-                    endValue = new ValueContainer(targetValue),
-                    direction = direction,
-                    easeStyle = style,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    updater = manager.ShaderFloat
-                };
-
-                return manager.startTweenInternal(mat, newInfo);
-            }
-
-            /// <summary>
-            /// Interpolates from the current passed shader value to the target value.
-            /// </summary>
-            /// <param name="mat">The material to tween.</param>
-            /// <param name="shaderValue">The shader color parameter.</param>
-            /// <param name="duration">How long the tween should last.</param>
-            /// <param name="targetColor">The color to tween to.</param>
-            /// <param name="style">The easing style to use.</param>
-            /// <param name="direction">The direction to ease with.</param>
-            /// <returns>A tween struct to help in controlling the tween after it is created.</returns>
-            public static Tween ShaderColor(Material mat, string shaderValue, Color targetColor, float duration, EasingStyle style, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, Color? startValue = null, int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo()
-                {
-                    duration = duration,
-                    matShaderValue = shaderValue,
-                    startValue = new ValueContainer(startValue.HasValue ? startValue.Value : mat.GetColor(shaderValue)),
-                    endValue = new ValueContainer(targetColor),
-                    direction = direction,
-                    easeStyle = style,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    updater = manager.ShaderColor
-                };
-
-                return manager.startTweenInternal(mat, newInfo);
-            }
-
-            public static Tween MaterialColor(Material mat, Color targetColor, float duration, EasingStyle style, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, Color? startValue = null, int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo()
-                {
-                    duration = duration,
-                    startValue = new ValueContainer(startValue.HasValue ? startValue.Value : mat.color),
-                    endValue = new ValueContainer(targetColor),
-                    easeStyle = style,
-                    direction = direction,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    updater = manager.MaterialColor
-                };
-
-                return manager.startTweenInternal(mat, newInfo);
-            }
-
-            public static Tween GlobalMatVar(GameObject refGameOBJ, string varName, float start, float target, float duration, EasingStyle style, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo()
-                {
-                    duration = duration,
-                    startValue = new ValueContainer(start),
-                    endValue = new ValueContainer(target),
-                    easeStyle = style,
-                    direction = direction,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    matShaderValue = varName,
-                    updater = manager.GlobalMatVar
-                };
-
-                return manager.startTweenInternal(refGameOBJ, newInfo);
-            }
-
-            public static Tween ImageColor(Image image, Color targetColor, float duration , EasingStyle style, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, Color? startValue = null, int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo()
-                {
-                    duration = duration,
-                    startValue = new ValueContainer(startValue.HasValue ? startValue.Value : image.color),
-                    endValue = new ValueContainer(targetColor),
-                    easeStyle = style,
-                    direction = direction,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    useUnscaledTime = true,
-                    updater = manager.ImageColor
-                };
-
-                return manager.startTweenInternal(image, newInfo);
-            }
-
-            public static Tween TextColor(TMP_Text text, Color targetColor, float duration, EasingStyle style, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, Color? startValue = null, int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo()
-                {
-                    duration = duration,
-                    startValue = new ValueContainer(startValue.HasValue ? startValue.Value : text.color),
-                    endValue = new ValueContainer(targetColor),
-                    easeStyle = style,
-                    direction = direction,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    updater = manager.TextColor
-                };
-
-                return manager.startTweenInternal(text, newInfo);
-            }
-
-            public static Tween SliderValue(Slider slider, float targetValue, float duration, EasingStyle style, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, float? startValue = null, int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo()
-                {
-                    duration = duration,
-                    startValue = new ValueContainer(startValue.HasValue ? startValue.Value : slider.value),
-                    endValue = new ValueContainer(targetValue),
-                    easeStyle = style,
-                    direction = direction,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    updater = manager.SliderValue
-                };
-
-                return manager.startTweenInternal(slider, newInfo);
-            }
-
-            /// <summary>
-            /// Interpolates between the current position and target position.
-            /// </summary>
-            /// <param name="targetObject">The object to tween.</param>
-            /// <param name="target">The target position that should be hit.</param>
-            /// <param name="duration">How long the tween should last.</param>
-            /// <param name="style">The easing style to use.</param>
-            /// <param name="direction">The direction to ease with.</param>
-            /// <returns>A tween struct to help in controlling the tween after it is created.</returns>
-            public static Tween Position(GameObject targetObject, Vector3 target, float duration, EasingStyle style = EasingStyle.Linear, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, Vector3? startValue = null, int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo() 
-                {
-                    duration = duration,
-                    startValue = new ValueContainer(startValue.HasValue ? startValue.Value : targetObject.transform.position),
-                    endValue = new ValueContainer(target),
-                    direction = direction,
-                    easeStyle = style,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    updater = manager.Position
-                };
-
-                return manager.startTweenInternal(targetObject, newInfo);
-            }
-
-            /// <summary>
-            /// Interpolates between the current rotation and the target rotation.
-            /// </summary>
-            /// <param name="targetObject">The object to tween.</param>
-            /// <param name="target">The target rotation that should be hit.</param>
-            /// <param name="duration">How long the tween should last.</param>
-            /// <param name="style">The easing style to use.</param>
-            /// <param name="direction">The direction to ease with.</param>
-            /// <returns>A tween struct to help in controlling the tween after it is created.</returns>
-            public static Tween Rotation(GameObject targetObject, Quaternion target, float duration, EasingStyle style = EasingStyle.Linear, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, Quaternion? startValue = null, int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo()
-                {
-                    duration = duration,
-                    startValue = new ValueContainer(startValue.HasValue ? startValue.Value : targetObject.transform.rotation),
-                    endValue = new ValueContainer(target),
-                    direction = direction,
-                    easeStyle = style,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    updater = manager.Rotation
-                };
-                
-                return manager.startTweenInternal(targetObject, newInfo);
-            }
-
-            /// <summary>
-            /// Interpolates between the current rotation and the target rotation.
-            /// </summary>
-            /// <param name="targetObject">The object to tween.</param>
-            /// <param name="target">The target rotation that should be hit.</param>
-            /// <param name="duration">How long the tween should last.</param>
-            /// <param name="style">The easing style to use.</param>
-            /// <param name="direction">The direction to ease with.</param>
-            /// <returns>A tween struct to help in controlling the tween after it is created.</returns>
-            public static Tween LocalRotation(GameObject targetObject, Quaternion target, float duration, EasingStyle style = EasingStyle.Linear, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, Quaternion? startValue = null, int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo()
-                {
-                    duration = duration,
-                    startValue = new ValueContainer(startValue.HasValue ? startValue.Value : targetObject.transform.rotation),
-                    endValue = new ValueContainer(target),
-                    direction = direction,
-                    easeStyle = style,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    updater = manager.LocalRotation
-                };
-
-                return manager.startTweenInternal(targetObject, newInfo);
-            }
-
-            /// <summary>
-            /// Interpolates between the current scale and target scale.
-            /// </summary>
-            /// <param name="targetObject">The object to tween.</param>
-            /// <param name="target">The target position that should be hit.</param>
-            /// <param name="duration">How long the tween should last.</param>
-            /// <param name="style">The easing style to use.</param>
-            /// <param name="direction">The direction to ease with.</param>
-            /// <returns>A tween struct to help in controlling the tween after it is created.</returns>
-            public static Tween LocalScale(GameObject targetObject, Vector3 target, float duration, EasingStyle style = EasingStyle.Linear, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, Vector3? startValue = null, int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo()
-                {
-                    duration = duration,
-                    startValue = new ValueContainer(startValue.HasValue ? startValue.Value : targetObject.transform.localScale),
-                    endValue = new ValueContainer(target),
-                    direction = direction,
-                    easeStyle = style,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    updater = manager.LocalScale
-                };
-
-                return manager.startTweenInternal(targetObject, newInfo);
-
-            }
-
-            /// <summary>
-            /// Interpolates between the current position and target position. Make sure the game object passed is parented to something to get use out of this function.
-            /// </summary>
-            /// <param name="targetObject">The object to tween.</param>
-            /// <param name="target">The target position that should be hit.</param>
-            /// <param name="duration">How long the tween should last.</param>
-            /// <param name="style">The easing style to use.</param>
-            /// <param name="direction">The direction to ease with.</param>
-            /// <returns>A tween struct to help in controlling the tween after it is created.</returns>
-            public static Tween LocalPosition(GameObject targetObject, Vector3 target, float duration, EasingStyle style = EasingStyle.Linear, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, Vector3? startValue = null, int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo()
-                {
-                    duration = duration,
-                    startValue = new ValueContainer(startValue.HasValue ? startValue.Value : targetObject.transform.localPosition),
-                    endValue = new ValueContainer(target),
-                    direction = direction,
-                    easeStyle = style,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    updater = manager.LocalPosition
-                };
-
-                return manager.startTweenInternal(targetObject, newInfo);
-            }
-
-            /// <summary>
-            /// Interpolates a canvas group's alpha value.
-            /// </summary>
-            /// <param name="targetObject">The object to tween.</param>
-            /// <param name="target">The target alpha that should be hit.</param>
-            /// <param name="duration">How long the tween should last.</param>
-            /// <param name="style">The easing style to use.</param>
-            /// <param name="direction">The direction to ease with.</param>
-            /// <returns>A tween struct to help in controlling the tween after it is created.</returns>
-            public static Tween CanvasGroupAlpha(CanvasGroup targetObject, float target, float duration, EasingStyle style = EasingStyle.Linear, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, float? startValue = null, int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo()
-                {
-                    duration = duration,
-                    startValue = new ValueContainer(startValue.HasValue ? startValue.Value : targetObject.alpha),
-                    endValue = new ValueContainer(target),
-                    direction = direction,
-                    useUnscaledTime = true,
-                    easeStyle = style,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    updater = manager.CanvasGroupAlpha
-                };
-
-                return manager.startTweenInternal(targetObject, newInfo);
-            }
-
-            /// <summary>
-            /// Interpolates between the current direction and target direction.
-            /// </summary>
-            /// <param name="targetObject">The object to tween.</param>
-            /// <param name="target">The target direction that should be hit.</param>
-            /// <param name="duration">How long the tween should last.</param>
-            /// <param name="style">The easing style to use.</param>
-            /// <param name="direction">The direction to ease with.</param>
-            /// <returns>A tween struct to help in controlling the tween after it is created.</returns>
-            public static Tween TransformUp(GameObject targetObject, Vector3 target, float duration, EasingStyle style = EasingStyle.Linear, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, Vector3? startValue = null, int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo()
-                {
-                    duration = duration,
-                    startValue = new ValueContainer(startValue.HasValue ? startValue.Value : targetObject.transform.up),
-                    endValue = new ValueContainer(target),
-                    direction = direction,
-                    easeStyle = style,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    updater = manager.TransformUp
-                };
-
-                return manager.startTweenInternal(targetObject, newInfo);
-            }
-            public static Tween CameraFOV(CinemachineCamera cam, float start, float end, float duration, EasingStyle style = EasingStyle.Linear, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, float startValue = 0, int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo()
-                {
-                    duration = duration,
-                    startValue = new ValueContainer(start),
-                    endValue = new ValueContainer(end),
-                    direction = direction,
-                    easeStyle = style,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    updater = manager.CameraFOV
-                };
-
-                return manager.startTweenInternal(cam, newInfo);
-            }
-
-            public static Tween BezierKnotPosition(SplineContainer container, int splineIndex, int knotIndex, BezierKnot start, BezierKnot end, float duration, EasingStyle style = EasingStyle.Linear, EasingDirection direction = EasingDirection.Out, float reverseDuration = -1, float startValue = 0, int repeatCount = 0)
-            {
-                TweeningManager manager = TweeningManager.instance;
-                TweenInfo newInfo = new TweenInfo()
-                {
-                    duration = duration,
-                    startValue = new ValueContainer(start),
-                    endValue = new ValueContainer(end),
-                    direction = direction,
-                    easeStyle = style,
-                    reverses = reverseDuration >= 0,
-                    reverseDuration = reverseDuration,
-                    repeatCount = repeatCount,
-                    splineIndex = splineIndex,
-                    knotIndex = knotIndex,
-                    updater = manager.BezierKnotPosition
-                };
-
-                return manager.startTweenInternal(container, newInfo);
-            }
-
-            /// <summary>
-            /// Shakes the passed game object based on the settings provided.
-            /// </summary>
-            /// <param name="targetObject">The object to shake.</param>
-            /// <param name="duration">How long the shake will last.</param>
-            /// <param name="positionInfluence">The maximum value of the positional shake @ magnitude = 1.</param>
-            /// <param name="rotationInfluence">The maximum value of the rotational shake @ magnitude = 1, uses euler angles</param>
-            /// <param name="useUnscaledTime">Whether or not you want the shake to run without time scale.</param>
-            public static void Shake(GameObject targetObject, float duration, Vector3 positionInfluence, Vector3 rotationInfluence = default(Vector3), bool useUnscaledTime = false)
-            {
-                TweeningManager manager = TweeningManager.instance;
-
-                manager.Shake(targetObject, duration, positionInfluence, rotationInfluence, useUnscaledTime);
-            }
-
-            /// <summary>
-            /// Shakes the rotation of a cinemachine recomposer attached onto a cinemachine camera.
-            /// </summary>
-            /// <param name="target">The recomposer to shake.</param>
-            /// <param name="duration">How long the shake will last.</param>
-            /// <param name="rotationInfluence">The maximum value of the rotational shake @ magnitude = 1, uses euler angles.</param>
-            /// <param name="useUnscaledTime">Whether or not you want the shake to run without time scale.</param>
-            public static void CinemachineRecomposerShake(CinemachineRecomposer target, float duration, Vector3 rotationInfluence = default(Vector3), bool useUnscaledTime = false)
-            {
-                TweeningManager manager = TweeningManager.instance;
-
-                manager.CinemachineRecomposerShake(target, duration, rotationInfluence, useUnscaledTime);
-            }
-            #endregion
         }
         internal struct TweenInfo
         {
@@ -758,6 +436,8 @@ namespace VG
             public ValueContainer startValue;
             public ValueContainer endValue;
 
+            public Tweener.UpdateType updateType;
+
             // other values
             public string matShaderValue;
             public int knotIndex;
@@ -771,7 +451,7 @@ namespace VG
             internal long id;
             internal TweenObject _target;
 
-            // State variables
+            // State variables & getters
 
             /// <summary>
             /// The Tween's status. If false, the tween will no longer be interactable.
@@ -784,7 +464,9 @@ namespace VG
 
             public float progress { get { return active ? _target.currentTime / _target.duration : 0f; } }
 
+            public string objectName { get { return active ? _target._object.name : null; } }
 
+            
             // Tween Control Methods //
 
             /// <summary>
@@ -792,6 +474,9 @@ namespace VG
             /// </summary>
             public void Play()
             {
+                if (!active) return;
+
+                _target.paused = false;
             }
 
             /// <summary>
@@ -799,7 +484,9 @@ namespace VG
             /// </summary>
             public void Pause()
             {
+                if (!active) return;
 
+                _target.paused = true;
             }
 
             /// <summary>
@@ -808,7 +495,6 @@ namespace VG
             public void Stop()
             {
                 if (!active) return;
-                if (_target == null) return;
 
                 TweeningManager.instance.freeTweenToPoolInternal(_target);
                 _target = null;
@@ -817,18 +503,42 @@ namespace VG
             public void Complete()
             {
                 if (!active) return;
-                if (_target == null) return;
 
                 _target.updateFnc.Invoke(_target, 1f);
                 TweeningManager.instance.freeTweenToPoolInternal(_target);
             }
+            
+            public void SetLoopState(bool state)
+            {
+                if (!active) return;
+
+                _target.looping = state;
+            }
+
+            public Tweener.UpdateType updateType { get { return _target.updateType; } }
 
             // Callback Methods //
+            
+            /// <summary>
+            /// Calls the provided callback when a tween is updated within the update loop.
+            /// </summary>
+            /// <param name="callback"></param>
             public void OnUpdate(Tweener.TweenCallback callback)
             {
                 _target.onUpdateActions += callback;
             }
 
+            /// <summary>
+            /// Calls the provided callback when a tween completes. A tween can be completed in a few different ways:
+            ///<br/> - Getting overridden (another tween plays with the same object and update function)
+            ///<br/> - Manually completing the tween using the Tween struct's "Complete" method
+            ///<br/> - Letting the tween play out it's full duration
+            /// </summary>
+            /// <param name="callback">The callback function to use. Takes one parameter, which is a Tween struct.</param>
+            public void OnComplete(Tweener.TweenCallback callback)
+            {
+                _target.onCompleteActions += callback;
+            }
 
             // constructor
             internal Tween(TweenObject target)
@@ -846,15 +556,16 @@ namespace VG
 
             // tween props
             public float duration = 0f; // length of tween
-            public float reverseDuration = 0f; // length of reverse tween
+            public float reverseDuration = -1f; // length of reverse tween
             public float initialDuration = 0f; // if repeats as well as reverses, needs to be here
             public float delay = 0f;
             public bool reverses = false;
             public float currentTime = 0f;
             public int repeatCount = 0;
-            public bool looping = true;
-            public bool pasued = false;
+            public bool looping = false;
+            public bool paused = false;
             public bool useUnscaledTime = false;
+            public Tweener.UpdateType updateType = Tweener.UpdateType.Update;
 
             // easing stuff
             public EasingStyle easeStyle = EasingStyle.Linear;
@@ -875,11 +586,10 @@ namespace VG
             public int knotIndex;
             public int splineIndex;
 
+
             public static bool operator ==(TweenObject a, TweenObject b)
             {
                 if (a is null || b is null) return false;
-                if (a._object != b._object) return false;          
-                if (!a.updateFnc.Equals(b.updateFnc)) return false;
                 if (a.id != b.id) return false;
 
                 return true;
